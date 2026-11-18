@@ -1,0 +1,18 @@
+# Ambiente virtual
+.venv/
+
+# Secretos: NUNCA se suben
+.env
+
+# Datos (se descargan de Kaggle, no se versionan)
+data/olist/*
+!data/olist/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Mac / editores
+.DS_Store
+.vscode/
