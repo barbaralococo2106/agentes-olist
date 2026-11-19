@@ -12,9 +12,14 @@ Corre cada caso de evals/casos.yaml contra una versión del agente y lo mide de 
      correcta / parcial / incorrecta. Capta lo que las reglas fijas no ven
      (p. ej. el caso sin datos), pero es menos confiable: por eso no es la única métrica.
 
+Sets de casos:
+  desarrollo  (evals/casos.yaml)            -> se usa para mejorar el agente
+  validacion  (evals/casos_validacion.yaml) -> solo para medir; nunca para ajustar el prompt
+
 Uso (desde la raíz del repo, con el .venv activo):
     python evals/run_evals.py --agente v2
-    python evals/run_evals.py --agente v1
+    python evals/run_evals.py --agente v2 --set validacion
+    python evals/run_evals.py --agente v2 --repeticiones 3
     python evals/run_evals.py --agente v2 --casos c02,c10
     python evals/run_evals.py --agente v2 --sin-juez
 """
@@ -29,6 +34,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -39,7 +45,10 @@ import yaml
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ / "src"))
 
-CASOS_FILE = RAIZ / "evals" / "casos.yaml"
+SETS = {
+    "desarrollo": RAIZ / "evals" / "casos.yaml",
+    "validacion": RAIZ / "evals" / "casos_validacion.yaml",
+}
 RESULTADOS_DIR = RAIZ / "evals" / "resultados"
 JUDGE_MODEL = os.getenv("JUDGE_MODEL", "openai/gpt-oss-20b")
 
@@ -47,6 +56,10 @@ JUDGE_MODEL = os.getenv("JUDGE_MODEL", "openai/gpt-oss-20b")
 # ---------------------------------------------------------------------------
 # Llamadas al modelo: reintentos ante rate limit + conteo de llamadas y tokens
 # ---------------------------------------------------------------------------
+class LimiteDiario(Exception):
+    """El proveedor pide esperar demasiado: probablemente se agotó la cuota del día."""
+
+
 def llamar_con_reintentos(fn, **kwargs):
     for intento in range(6):
         try:
@@ -57,6 +70,8 @@ def llamar_con_reintentos(fn, **kwargs):
                 espera = float(e.response.headers.get("retry-after", espera)) + 1
             except Exception:
                 pass
+            if espera > 120:
+                raise LimiteDiario(f"la API pide esperar {espera / 60:.0f} minutos")
             print(f"    (límite de uso de la API: espero {espera:.0f} s y reintento)", file=sys.__stdout__)
             time.sleep(espera)
     raise RuntimeError("Se superó el límite de uso de la API varias veces seguidas.")
@@ -88,6 +103,12 @@ def cerca(valor, referencia):
     return abs(valor - referencia) <= max(0.01 * abs(referencia), 0.011)
 
 
+def sin_acentos(texto: str) -> str:
+    """'São Paulo' -> 'sao paulo' (para comparar nombres sin depender de tildes)."""
+    base = unicodedata.normalize("NFKD", texto)
+    return "".join(ch for ch in base if not unicodedata.combining(ch)).lower().strip()
+
+
 def _normalizar(v):
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return None
@@ -96,7 +117,7 @@ def _normalizar(v):
     try:
         return float(str(v))
     except ValueError:
-        return str(v).strip().lower()
+        return sin_acentos(str(v))
 
 
 def _misma_columna(ref_vals, ag_vals, ordenado):
@@ -166,7 +187,7 @@ def numeros_en_texto(texto):
 def valores_en_respuesta(ref: pd.DataFrame, columnas, respuesta: str):
     """Devuelve (encontrados, total) de los valores clave de la referencia."""
     numeros = numeros_en_texto(respuesta)
-    texto = respuesta.lower()
+    texto = sin_acentos(respuesta)
     encontrados = total = 0
     for c in columnas:
         for v in ref[c].tolist():
@@ -231,6 +252,8 @@ def correr_caso(modulo, medidor, consultas, caso, usar_juez):
     try:
         with contextlib.redirect_stdout(salida_agente):   # silenciamos los prints del agente
             respuesta = modulo.agente(caso["pregunta"])
+    except LimiteDiario:
+        raise
     except Exception as e:
         respuesta, error = "", f"{type(e).__name__}: {e}"
     segundos = time.time() - t0
@@ -245,19 +268,19 @@ def correr_caso(modulo, medidor, consultas, caso, usar_juez):
     if caso.get("sql_referencia"):
         ref = modulo.con.execute(caso["sql_referencia"]).fetchdf()
         referencia_txt = ref.to_string(index=False)
+        columnas = caso.get("columnas_clave", list(ref.columns))
 
         # Métrica 1: ¿alguna consulta del agente coincide con la referencia?
         fila["ejecucion"] = False
         for q in consultas:
             try:
-                if coincide(ref, modulo.con.execute(q).fetchdf(), caso.get("ordenado", False)):
+                if coincide(ref[columnas], modulo.con.execute(q).fetchdf(), caso.get("ordenado", False)):
                     fila["ejecucion"] = True
                     break
             except Exception:
                 continue
 
         # Métrica 2: ¿los valores clave aparecen en la respuesta?
-        columnas = caso.get("columnas_clave", list(ref.columns))
         encontrados, total = valores_en_respuesta(ref, columnas, respuesta)
         fila["valores"] = encontrados == total
         fila["valores_detalle"] = f"{encontrados}/{total}"
@@ -278,19 +301,30 @@ def simbolo(v):
     return {True: "✓", False: "✗", None: "–"}.get(v, str(v))
 
 
-def imprimir_resumen(df, agente, modelo):
-    print(f"\n{'=' * 78}\nRESUMEN — agente {agente} ({modelo}), {len(df)} casos\n{'=' * 78}")
+def _puntaje_juez(serie):
+    return serie.map({"correcta": 1, "parcial": 0.5}).fillna(0)
+
+
+def imprimir_resumen(df, agente, modelo, nombre_set):
+    reps = df["repeticion"].nunique()
+    n_casos = df["id"].nunique()
+    print(f"\n{'=' * 78}\nRESUMEN — agente {agente} ({modelo}), set {nombre_set}: "
+          f"{n_casos} casos x {reps} corrida(s)\n{'=' * 78}")
+
+    # Una tasa por corrida; si hay varias corridas, mostramos promedio y rango.
+    def reportar(nombre, por_corrida):
+        if por_corrida.empty:
+            return
+        texto = f"{por_corrida.mean():.0%}"
+        if reps > 1:
+            texto += f"  (rango entre corridas: {por_corrida.min():.0%} – {por_corrida.max():.0%})"
+        print(f"{nombre:<34}{texto}")
 
     con_ref = df[df["ejecucion"].notna()]
-    if len(con_ref):
-        print(f"Ejecución (SQL correcto):        {con_ref['ejecucion'].astype(bool).sum()}/{len(con_ref)}"
-              f"  ({con_ref['ejecucion'].astype(bool).mean():.0%})")
-        print(f"Valores en la respuesta:         {con_ref['valores'].astype(bool).sum()}/{len(con_ref)}"
-              f"  ({con_ref['valores'].astype(bool).mean():.0%})")
+    reportar("Ejecución (SQL correcto):", con_ref.groupby("repeticion")["ejecucion"].apply(lambda s: s.astype(bool).mean()))
+    reportar("Valores en la respuesta:", con_ref.groupby("repeticion")["valores"].apply(lambda s: s.astype(bool).mean()))
     juzgados = df[df["juez"].notna()]
-    if len(juzgados):
-        puntaje = juzgados["juez"].map({"correcta": 1, "parcial": 0.5}).fillna(0)
-        print(f"Juez (correcta=1, parcial=0.5):  {puntaje.sum():g}/{len(juzgados)}  ({puntaje.mean():.0%})")
+    reportar("Juez (correcta=1, parcial=0.5):", juzgados.groupby("repeticion")["juez"].apply(lambda s: _puntaje_juez(s).mean()))
 
     print(f"Costo: {df['llamadas'].sum()} llamadas, {df['tokens'].sum():,} tokens, "
           f"{df['segundos'].mean():.1f} s promedio por pregunta")
@@ -300,15 +334,39 @@ def imprimir_resumen(df, agente, modelo):
         for dif, g in juzgados.groupby("dificultad", sort=False):
             print(f"  {dif:<10} {(g['juez'] == 'correcta').sum()}/{len(g)}")
 
+    # Un caso "aprueba" una corrida si el juez dice correcta y, cuando hay referencia SQL,
+    # además la ejecución es correcta.
+    aprueba = (df["juez"] == "correcta") | (df["juez"].isna() & df["ejecucion"].fillna(False).astype(bool))
+    aprueba &= df["ejecucion"].isna() | df["ejecucion"].fillna(False).astype(bool)
+    tasa = aprueba.groupby(df["id"]).mean()
+    fallan = tasa[tasa == 0].index.tolist()
+    inestables = tasa[(tasa > 0) & (tasa < 1)]
+    print("\nCasos que fallan siempre: " + (", ".join(fallan) if fallan else "ninguno"))
+
+    # Desacuerdos: el SQL coincide con la referencia pero el juez dice que no (o al revés).
+    # Son los casos que más conviene revisar a mano: o el juez se equivocó,
+    # o el agente consultó bien pero comunicó mal.
+    juez_ok = df["juez"] == "correcta"
+    ejec_ok = df["ejecucion"].fillna(False).astype(bool)
+    hay_ambos = df["juez"].notna() & df["ejecucion"].notna()
+    desacuerdos = sorted(set(df.loc[hay_ambos & (juez_ok != ejec_ok), "id"]))
+    print("Desacuerdos entre SQL y juez (revisar a mano): "
+          + (", ".join(desacuerdos) if desacuerdos else "ninguno"))
+    if reps > 1:
+        print("Casos inestables (a veces sí, a veces no): "
+              + (", ".join(f"{i} ({t:.0%})" for i, t in inestables.items()) if len(inestables) else "ninguno"))
+
 
 def main():
     parser = argparse.ArgumentParser(description="Evals del agente analista")
     parser.add_argument("--agente", default="v2", help="versión del agente: v1, v2, ...")
+    parser.add_argument("--set", default="desarrollo", choices=SETS.keys(), help="qué set de casos correr")
     parser.add_argument("--casos", help="ids separados por coma, p. ej. c01,c10")
+    parser.add_argument("--repeticiones", type=int, default=1, help="cuántas veces correr cada caso")
     parser.add_argument("--sin-juez", action="store_true", help="no usar el LLM como juez")
     args = parser.parse_args()
 
-    casos = yaml.safe_load(CASOS_FILE.read_text(encoding="utf-8"))
+    casos = yaml.safe_load(SETS[args.set].read_text(encoding="utf-8"))
     if args.casos:
         elegidos = set(args.casos.split(","))
         casos = [c for c in casos if c["id"] in elegidos]
@@ -328,24 +386,34 @@ def main():
 
     modulo.FUNCIONES["ejecutar_sql"] = ejecutar_espiado
 
-    print(f"Evaluando agente {args.agente} ({modulo.MODEL}) en {len(casos)} casos. "
-          f"Juez: {'no' if args.sin_juez else JUDGE_MODEL}\n")
-    print(f"{'caso':<5} {'dificultad':<10} {'ejec':^5} {'valores':^8} {'juez':<11} {'llam':>4} {'tokens':>7} {'seg':>5}")
+    print(f"Evaluando agente {args.agente} ({modulo.MODEL}) — set {args.set}, {len(casos)} casos "
+          f"x {args.repeticiones} corrida(s). Juez: {'no' if args.sin_juez else JUDGE_MODEL}")
 
     filas = []
-    for caso in casos:
-        fila = correr_caso(modulo, medidor, consultas, caso, not args.sin_juez)
-        filas.append(fila)
-        print(f"{fila['id']:<5} {fila['dificultad']:<10} {simbolo(fila['ejecucion']):^5} "
-              f"{fila.get('valores_detalle', '–'):^8} {str(fila['juez'] or '–'):<11} "
-              f"{fila['llamadas']:>4} {fila['tokens']:>7} {fila['segundos']:>5}"
-              + (f"  ERROR: {fila['error'][:60]}" if fila["error"] else ""))
+    try:
+        for rep in range(1, args.repeticiones + 1):
+            if args.repeticiones > 1:
+                print(f"\n--- Corrida {rep} de {args.repeticiones} ---")
+            print(f"\n{'caso':<5} {'dificultad':<10} {'ejec':^5} {'valores':^8} {'juez':<11} {'llam':>4} {'tokens':>7} {'seg':>5}")
+            for caso in casos:
+                fila = correr_caso(modulo, medidor, consultas, caso, not args.sin_juez)
+                fila["repeticion"] = rep
+                filas.append(fila)
+                print(f"{fila['id']:<5} {fila['dificultad']:<10} {simbolo(fila['ejecucion']):^5} "
+                      f"{fila.get('valores_detalle', '–'):^8} {str(fila['juez'] or '–'):<11} "
+                      f"{fila['llamadas']:>4} {fila['tokens']:>7} {fila['segundos']:>5}"
+                      + (f"  ERROR: {fila['error'][:60]}" if fila["error"] else ""))
+    except LimiteDiario as e:
+        print(f"\nCORTE: {e}. Probablemente se agotó la cuota gratuita del día. "
+              "Guardo lo que se alcanzó a correr; probá de nuevo más tarde.")
 
+    if not filas:
+        return
     df = pd.DataFrame(filas)
-    imprimir_resumen(df, args.agente, modulo.MODEL)
+    imprimir_resumen(df, args.agente, modulo.MODEL, args.set)
 
     RESULTADOS_DIR.mkdir(exist_ok=True)
-    archivo = RESULTADOS_DIR / f"{args.agente}_{datetime.now():%Y%m%d_%H%M}.csv"
+    archivo = RESULTADOS_DIR / f"{args.agente}_{args.set}_{datetime.now():%Y%m%d_%H%M}.csv"
     df.to_csv(archivo, index=False)
     print(f"\nDetalle completo (respuestas, SQL, motivos del juez) en {archivo.relative_to(RAIZ)}")
 

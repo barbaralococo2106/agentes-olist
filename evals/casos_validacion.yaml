@@ -1,0 +1,128 @@
+# Set de VALIDACIÓN del agente analista.
+#
+# Regla de oro: estos casos NO se usan para mejorar el prompt.
+# Si un caso falla, se corrige el agente pensando en el problema general,
+# nunca agregando una regla hecha a medida para este caso. Si no, deja de
+# medir cómo generaliza el agente (es el equivalente a entrenar con el test set).
+#
+# Mismo formato que casos.yaml. "columnas_clave" define qué columnas de la
+# referencia se comparan (en el SQL y en el texto de la respuesta).
+
+- id: v01
+  dificultad: media
+  pregunta: ¿En qué mes hubo más órdenes?
+  sql_referencia: |
+    SELECT strftime(order_purchase_timestamp, '%Y-%m') AS mes, COUNT(*) AS ordenes
+    FROM orders GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+  ordenado: true
+  columnas_clave: [ordenes]
+  trampa: agrupar por mes sin año (mezcla noviembre de 2016, 2017 y 2018)
+
+- id: v02
+  dificultad: dificil
+  pregunta: ¿Cuánto crecieron las órdenes de 2017 a 2018, en porcentaje?
+  sql_referencia: |
+    SELECT ROUND(100.0 * (
+             SUM(CASE WHEN year(order_purchase_timestamp) = 2018 THEN 1 ELSE 0 END) * 1.0
+           / SUM(CASE WHEN year(order_purchase_timestamp) = 2017 THEN 1 ELSE 0 END) - 1), 2) AS crecimiento_pct
+    FROM orders
+    WHERE month(order_purchase_timestamp) BETWEEN 1 AND 8
+  ordenado: false
+  trampa: los datos terminan en octubre de 2018; comparar años completos da ~20%, pero en el mismo período (enero-agosto) el crecimiento es ~135%
+
+- id: v03
+  dificultad: facil
+  pregunta: ¿Cuántos vendedores hay en la plataforma?
+  sql_referencia: SELECT COUNT(*) AS vendedores FROM sellers
+  ordenado: false
+  trampa: ninguna, es un caso de control
+
+- id: v04
+  dificultad: media
+  pregunta: ¿Qué ciudad tiene más clientes?
+  sql_referencia: |
+    SELECT customer_city AS ciudad, COUNT(DISTINCT customer_unique_id) AS clientes
+    FROM customers GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+  ordenado: true
+  trampa: contar customer_id (órdenes) en vez de personas
+
+- id: v05
+  dificultad: dificil
+  pregunta: ¿Qué porcentaje de los clientes volvió a comprar, es decir, hizo más de una orden?
+  sql_referencia: |
+    SELECT ROUND(100.0 * AVG(CASE WHEN n > 1 THEN 1 ELSE 0 END), 2) AS pct_recompra
+    FROM (
+      SELECT c.customer_unique_id, COUNT(DISTINCT o.order_id) AS n
+      FROM orders o JOIN customers c USING (customer_id)
+      GROUP BY 1
+    )
+  ordenado: false
+  trampa: con customer_id nadie repite nunca y da 0%
+
+- id: v06
+  dificultad: facil
+  pregunta: ¿Cuál es el costo de flete promedio por ítem vendido?
+  sql_referencia: SELECT ROUND(AVG(freight_value), 2) AS flete_promedio FROM order_items
+  ordenado: false
+  trampa: promediar por orden en vez de por ítem
+
+- id: v07
+  dificultad: media
+  pregunta: ¿Cuál es la categoría de producto que más factura, considerando el precio de los productos?
+  sql_referencia: |
+    SELECT COALESCE(t.product_category_name_english, p.product_category_name) AS categoria,
+           ROUND(SUM(i.price), 2) AS facturacion
+    FROM order_items i
+    JOIN products p USING (product_id)
+    LEFT JOIN product_category_name_translation t USING (product_category_name)
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+  ordenado: true
+  trampa: usar payment_value (que es por orden y mezcla categorías)
+
+- id: v08
+  dificultad: dificil
+  pregunta: ¿Las órdenes que llegaron con atraso tienen peor review que las que llegaron a tiempo?
+  sql_referencia: |
+    WITH r AS (SELECT DISTINCT review_id, order_id, review_score FROM order_reviews)
+    SELECT o.order_delivered_customer_date > o.order_estimated_delivery_date AS con_atraso,
+           ROUND(AVG(r.review_score), 2) AS promedio
+    FROM r JOIN orders o USING (order_id)
+    WHERE o.order_status = 'delivered' AND o.order_delivered_customer_date IS NOT NULL
+    GROUP BY 1
+  ordenado: false
+  columnas_clave: [promedio]
+  trampa: responder sí/no sin cuantificar, o no filtrar órdenes entregadas
+
+- id: v09
+  dificultad: media
+  pregunta: ¿Cuál es el producto más vendido en cantidad de unidades?
+  sql_referencia: |
+    SELECT product_id, COUNT(*) AS unidades
+    FROM order_items GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+  ordenado: true
+  trampa: contar órdenes distintas en vez de ítems vendidos
+
+- id: v10
+  dificultad: sin_datos
+  pregunta: ¿Cuál es el margen de ganancia promedio de los vendedores?
+  respuesta_esperada: La base tiene precios de venta pero no costos, así que no se puede calcular el margen. El agente debería decirlo y no presentar la facturación o el flete como si fueran margen.
+  trampa: confundir facturación con ganancia
+
+- id: v11
+  dificultad: media
+  pregunta: ¿Qué día de la semana tiene más compras?
+  sql_referencia: |
+    SELECT dayname(order_purchase_timestamp) AS dia, COUNT(*) AS ordenes
+    FROM orders GROUP BY 1 ORDER BY 2 DESC LIMIT 1
+  ordenado: true
+  columnas_clave: [ordenes]
+  trampa: confundir la numeración de días (domingo = 0 en DuckDB)
+
+- id: v12
+  dificultad: facil
+  pregunta: ¿Cuántas órdenes se cancelaron en 2018?
+  sql_referencia: |
+    SELECT COUNT(*) AS canceladas FROM orders
+    WHERE order_status = 'canceled' AND year(order_purchase_timestamp) = 2018
+  ordenado: false
+  trampa: filtrar por una fecha que no es la de compra
