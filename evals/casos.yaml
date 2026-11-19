@@ -1,0 +1,140 @@
+# Set de evaluación del agente analista.
+#
+# Cada caso tiene:
+#   id, dificultad          -> para agrupar resultados
+#   pregunta                -> lo que se le pregunta al agente
+#   sql_referencia          -> consulta verificada a mano; su resultado es la "verdad"
+#   ordenado                -> true si el orden de las filas importa (rankings)
+#   columnas_clave          -> (opcional) qué columnas tienen que aparecer en la respuesta
+#   trampa                  -> qué error típico pone a prueba este caso
+#   respuesta_esperada      -> solo para casos sin SQL (el juez evalúa contra este texto)
+
+- id: c01
+  dificultad: facil
+  pregunta: ¿Cuántas órdenes hay en total?
+  sql_referencia: SELECT COUNT(*) AS ordenes FROM orders
+  ordenado: false
+  trampa: ninguna, es el caso base
+
+- id: c02
+  dificultad: facil
+  pregunta: ¿Cuántos clientes únicos tiene Olist?
+  sql_referencia: SELECT COUNT(DISTINCT customer_unique_id) AS clientes FROM customers
+  ordenado: false
+  trampa: usar customer_id (cambia en cada orden) en vez de customer_unique_id
+
+- id: c03
+  dificultad: facil
+  pregunta: ¿Cuántos pagos hay por cada medio de pago?
+  sql_referencia: |
+    SELECT payment_type, COUNT(*) AS pagos
+    FROM order_payments GROUP BY 1 ORDER BY 2 DESC
+  ordenado: false
+  trampa: contar órdenes en vez de pagos
+
+- id: c04
+  dificultad: media
+  pregunta: ¿Cuáles son los 5 estados de Brasil con más facturación?
+  sql_referencia: |
+    SELECT c.customer_state AS estado, ROUND(SUM(p.payment_value), 2) AS facturacion
+    FROM order_payments p
+    JOIN orders o USING (order_id)
+    JOIN customers c USING (customer_id)
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+  ordenado: true
+  trampa: duplicar montos al cruzar con order_items
+
+- id: c05
+  dificultad: media
+  pregunta: ¿Cuál es el ticket promedio por orden?
+  sql_referencia: |
+    SELECT ROUND(AVG(total), 2) AS ticket_promedio
+    FROM (SELECT order_id, SUM(payment_value) AS total FROM order_payments GROUP BY 1)
+  ordenado: false
+  trampa: promediar filas de pago en vez de órdenes (una orden puede tener varios pagos)
+
+- id: c06
+  dificultad: media
+  pregunta: ¿Cuántas órdenes se hicieron en cada año?
+  sql_referencia: |
+    SELECT year(order_purchase_timestamp) AS anio, COUNT(*) AS ordenes
+    FROM orders GROUP BY 1 ORDER BY 1
+  ordenado: true
+  trampa: elegir otra fecha que no sea la de compra
+
+- id: c07
+  dificultad: media
+  pregunta: ¿Cuál es el promedio de cuotas en los pagos con tarjeta de crédito?
+  sql_referencia: |
+    SELECT ROUND(AVG(payment_installments), 2) AS cuotas_promedio
+    FROM order_payments WHERE payment_type = 'credit_card'
+  ordenado: false
+  trampa: no mapear "tarjeta de crédito" al valor 'credit_card'
+
+- id: c08
+  dificultad: dificil
+  pregunta: ¿Cuántos días tarda en promedio la entrega de una orden entregada, desde la compra hasta que llega al cliente? Respondé con decimales.
+  sql_referencia: |
+    SELECT ROUND(AVG(date_diff('second', order_purchase_timestamp, order_delivered_customer_date)) / 86400.0, 2) AS dias
+    FROM orders
+    WHERE order_status = 'delivered' AND order_delivered_customer_date IS NOT NULL
+  ordenado: false
+  trampa: truncar a días enteros o usar otra fecha de inicio
+
+- id: c09
+  dificultad: dificil
+  pregunta: ¿Qué porcentaje de las órdenes entregadas llegó después de la fecha estimada?
+  sql_referencia: |
+    SELECT ROUND(100.0 * AVG(CASE WHEN order_delivered_customer_date > order_estimated_delivery_date THEN 1 ELSE 0 END), 2) AS pct_atraso
+    FROM orders
+    WHERE order_status = 'delivered' AND order_delivered_customer_date IS NOT NULL
+  ordenado: false
+  trampa: no filtrar entregadas o dividir por el total de órdenes
+
+- id: c10
+  dificultad: dificil
+  pregunta: ¿Cuáles son las 5 categorías de producto con peor review promedio?
+  sql_referencia: |
+    WITH r AS (
+      SELECT DISTINCT r.review_id, r.review_score, p.product_category_name
+      FROM order_reviews r
+      JOIN order_items i USING (order_id)
+      JOIN products p USING (product_id)
+      WHERE p.product_category_name IS NOT NULL
+    )
+    SELECT COALESCE(t.product_category_name_english, r.product_category_name) AS categoria,
+           ROUND(AVG(review_score), 2) AS promedio, COUNT(*) AS n
+    FROM r LEFT JOIN product_category_name_translation t USING (product_category_name)
+    GROUP BY 1 HAVING COUNT(*) >= 30
+    ORDER BY 2 ASC LIMIT 5
+  ordenado: true
+  columnas_clave: [categoria, promedio]
+  trampa: reviews duplicadas por el JOIN con order_items y grupos chicos
+
+- id: c11
+  dificultad: dificil
+  pregunta: ¿Qué estado tiene el mejor review promedio?
+  sql_referencia: |
+    SELECT c.customer_state AS estado, ROUND(AVG(r.review_score), 2) AS promedio
+    FROM (SELECT DISTINCT review_id, order_id, review_score FROM order_reviews) r
+    JOIN orders o USING (order_id)
+    JOIN customers c USING (customer_id)
+    GROUP BY 1 HAVING COUNT(*) >= 30
+    ORDER BY 2 DESC LIMIT 1
+  ordenado: true
+  trampa: cadena de tres JOINs y estados con pocas reviews
+
+- id: c12
+  dificultad: dificil
+  pregunta: ¿Cuáles son los 3 vendedores que más facturaron en precio de productos, sin contar el flete?
+  sql_referencia: |
+    SELECT seller_id, ROUND(SUM(price), 2) AS facturacion
+    FROM order_items GROUP BY 1 ORDER BY 2 DESC LIMIT 3
+  ordenado: true
+  trampa: sumar el flete o usar payment_value
+
+- id: c13
+  dificultad: sin_datos
+  pregunta: ¿Cuántos usuarios visitaron el sitio web de Olist en 2018?
+  respuesta_esperada: La base no tiene datos de visitas ni de tráfico web, así que no se puede responder. El agente debería decirlo y no inventar una cifra (contar clientes u órdenes NO responde la pregunta).
+  trampa: inventar una respuesta con datos que no corresponden

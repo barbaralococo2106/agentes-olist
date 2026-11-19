@@ -1,0 +1,60 @@
+id,dificultad,pregunta,ejecucion,valores,juez,motivo_juez,llamadas,tokens,segundos,respuesta,consultas,error,valores_detalle
+c01,facil,¿Cuántas órdenes hay en total?,True,True,correcta,La respuesta coincide con la cifra de referencia.,3,1767,1.6,Hay **99 441** órdenes en total.,"[""SELECT COUNT(*) AS total_orders FROM orders""]",,1/1
+c02,facil,¿Cuántos clientes únicos tiene Olist?,False,False,incorrecta,El número de clientes reportado por el agente difiere significativamente del valor de referencia.,3,1788,2.2,Olist tiene **99 441 clientes únicos**.,"[""SELECT COUNT(DISTINCT customer_id) AS unique_customers FROM customers""]",,0/1
+c03,facil,¿Cuántos pagos hay por cada medio de pago?,True,True,correcta,El agente respondió correctamente con los totales exactos por medio de pago.,3,1955,2.1,"**Pagos por medio de pago**
+
+| Medio de pago | Cantidad de pagos |
+|---------------|-------------------|
+| credit_card   | 76 795 |
+| boleto        | 19 784 |
+| voucher       | 5 775 |
+| debit_card    | 1 529 |
+| not_defined   | 3 |
+
+Estos son los totales reales extraídos de la tabla **order_payments**.","[""SELECT payment_type, COUNT(*) AS num_payments FROM order_payments GROUP BY payment_type ORDER BY num_payments DESC""]",,10/10
+c04,media,¿Cuáles son los 5 estados de Brasil con más facturación?,True,True,correcta,El agente respondió correctamente con los estados y facturaciones coincidentes.,3,2162,2.2,"Los 5 estados con mayor facturación son:
+
+| Estado | Facturación (R$) |
+|--------|------------------|
+| **SP** | 5 998 226,96 |
+| **RJ** | 2 144 379,69 |
+| **MG** | 1 872 257,26 |
+| **RS** |   890 898,54 |
+| **PR** |   811 156,38 |
+
+Estos valores corresponden a la suma de los pagos de todas las órdenes realizadas por clientes de cada estado.","[""WITH payments AS (\n    SELECT o.order_id, c.customer_state, SUM(op.payment_value) AS order_total\n    FROM orders o\n    JOIN customers c ON o.customer_id = c.customer_id\n    JOIN order_payments op ON o.order_id = op.order_id\n    GROUP BY o.order_id, c.customer_state\n)\nSELECT customer_state AS estado, SUM(order_total) AS facturacion\nFROM payments\nGROUP BY customer_state\nORDER BY facturacion DESC\nLIMIT 5;""]",,10/10
+c05,media,¿Cuál es el ticket promedio por orden?,True,True,correcta,"El agente respondió con el valor correcto, redondeado a la unidad más cercana.",3,1910,4.4,"El ticket promedio por orden es **≈ 161 ** (valor medio del total pagado por cada orden, redondeado a dos decimales).","[""WITH order_totals AS (\n  SELECT op.order_id, SUM(op.payment_value) AS total\n  FROM order_payments op\n  GROUP BY op.order_id\n)\nSELECT ROUND(AVG(total), 2) AS ticket_promedio\nFROM order_totals;""]",,1/1
+c06,media,¿Cuántas órdenes se hicieron en cada año?,True,True,correcta,El agente respondió con los totales correctos por año.,3,1944,13.1,"**Órdenes por año**
+
+| Año | Cantidad de órdenes |
+|-----|---------------------|
+| 2016 | 329 |
+| 2017 | 45 101 |
+| 2018 | 54 011 |
+
+Estos son los totales de órdenes registradas en la tabla **orders** para cada año disponible.","[""SELECT EXTRACT(year FROM order_purchase_timestamp) AS year, COUNT(*) AS orders_count\nFROM orders\nGROUP BY year\nORDER BY year;""]",,6/6
+c07,media,¿Cuál es el promedio de cuotas en los pagos con tarjeta de crédito?,True,True,correcta,El agente respondió la pregunta y coincidió con el valor de referencia 3.51.,4,2769,19.0,El promedio de cuotas (installments) en los pagos con **tarjeta de crédito** es **3.51**.,"[""SELECT DISTINCT payment_type FROM order_payments LIMIT 10"", ""SELECT AVG(payment_installments)::DECIMAL(10,2) AS avg_installments FROM order_payments WHERE payment_type = 'credit_card'""]",,1/1
+c08,dificil,"¿Cuántos días tarda en promedio la entrega de una orden entregada, desde la compra hasta que llega al cliente? Respondé con decimales.",True,True,correcta,El agente responde la pregunta con la cifra correcta y en el formato adecuado.,3,2090,10.2,"En promedio, las órdenes que llegan al cliente tardan **≈ 12.56 días** desde la fecha de compra hasta la entrega.","[""SELECT AVG(EXTRACT(EPOCH FROM (order_delivered_customer_date - order_purchase_timestamp))/86400) AS avg_delivery_days\nFROM orders\nWHERE order_delivered_customer_date IS NOT NULL;""]",,1/1
+c09,dificil,¿Qué porcentaje de las órdenes entregadas llegó después de la fecha estimada?,True,True,correcta,El agente respondió con el porcentaje correcto y la información solicitada.,3,2286,14.0,"El **8,11 %** de las órdenes que fueron entregadas al cliente llegó después de la fecha estimada de entrega.","[""SELECT 100.0 * SUM(CASE WHEN order_delivered_customer_date > order_estimated_delivery_date THEN 1 ELSE 0 END) / COUNT(*) AS pct_late FROM orders WHERE order_delivered_customer_date IS NOT NULL""]",,1/1
+c10,dificil,¿Cuáles son las 5 categorías de producto con peor review promedio?,False,False,incorrecta,Las categorías y promedios no coinciden con la referencia.,3,2381,13.8,"**Top 5 de categorías con peor promedio de reseña (review_score)**  
+
+| Posición | Categoría | Promedio de review | Nº de reseñas |
+|----------|-----------|-------------------|---------------|
+| 1 | seguros_e_servicos | **2.50** | 2 |
+| 2 | fraldas_higiene | **3.26** | 39 |
+| 3 | portateis_cozinha_e_preparadores_de_alimentos | **3.27** | 15 |
+| 4 | pc_gamer | **3.33** | 9 |
+| 5 | moveis_escritorio | **3.49** | 1 687 |
+
+Estas son las cinco categorías con el puntaje promedio más bajo según las reseñas de los pedidos.","[""WITH reviews AS (\n  SELECT oi.product_id, orv.review_score\n  FROM order_items oi\n  JOIN order_reviews orv ON oi.order_id = orv.order_id\n)\nSELECT p.product_category_name AS categoria,\n       AVG(r.review_score) AS avg_score,\n       COUNT(*) AS total_reviews\nFROM reviews r\nJOIN products p ON r.product_id = p.product_id\nGROUP BY p.product_category_name\nORDER BY avg_score ASC\nLIMIT 5;""]",,0/10
+c11,dificil,¿Qué estado tiene el mejor review promedio?,True,True,correcta,"El agente menciona el estado AP con el promedio correcto de 4.19, coincidiendo con la referencia.",3,2482,14.3,"El estado con el mejor promedio de reseñas es **AP**, con una puntuación media de **4.19** basada en **67** reviews.","[""WITH review_state AS (\n  SELECT c.customer_state AS state, r.review_score\n  FROM order_reviews r\n  JOIN orders o ON r.order_id = o.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n)\nSELECT state, ROUND(AVG(review_score)::NUMERIC, 2) AS avg_review_score, COUNT(*) AS num_reviews\nFROM review_state\ngroup by state\norder by avg_review_score DESC\nlimit 1;""]",,2/2
+c12,dificil,"¿Cuáles son los 3 vendedores que más facturaron en precio de productos, sin contar el flete?",True,True,correcta,El agente proporcionó los mismos vendedores y montos que la referencia,3,2207,9.6,"Los tres vendedores con mayor facturación en precio de productos (sin incluir el flete) son:
+
+| Rank | seller_id                           | Facturación total (precio) |
+|------|-------------------------------------|----------------------------|
+| 1    | 4869f7a5dfa277a7dca6462dcf3b52b2    | $229,472.63 |
+| 2    | 53243585a1d6dc2643021fd1853d8905    | $222,776.05 |
+| 3    | 4a3ca9315b744ce9f8e9374361493884    | $200,472.92 |
+
+Estos valores provienen de la suma de la columna **price** en la tabla **order_items**, que representa el precio del producto sin el valor del flete.","[""SELECT seller_id, SUM(price) AS total_price\nFROM order_items\nGROUP BY seller_id\nORDER BY total_price DESC\nLIMIT 3""]",,6/6
+c13,sin_datos,¿Cuántos usuarios visitaron el sitio web de Olist en 2018?,,,incorrecta,"El agente inventó una cifra basada en compras, no en visitas, y la base no contiene datos de tráfico web.",3,2036,13.5,"En 2018, **54 011 usuarios distintos** realizaron al menos una compra (según el registro de órdenes).","[""SELECT COUNT(DISTINCT customer_id) AS usuarios_2018\nFROM orders\nWHERE order_purchase_timestamp >= '2018-01-01' AND order_purchase_timestamp < '2019-01-01';""]",,
